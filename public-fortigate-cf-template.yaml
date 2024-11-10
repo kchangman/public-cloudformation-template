@@ -1,0 +1,563 @@
+# ------------------------------------------------------------#
+# Description
+# - Purpose
+# Create VPC, private subnet, EC2 on the private subnet,
+# and endpoint for SSM to connect privte EC2.
+# 
+# - Condition
+# null
+#
+# - Create
+#   * VPC
+#   * EC2 (Public, Fortigate)
+#   * EIP(for Fortigate Inastance)
+#   * RouteTable (for 2 subnets)
+#   * EC2 (Private)
+#   * VPCEndpoint(3 Interfaces, 1 Gateway)
+#   * Security group (for 2 EC2, for VPCEndpoint)
+#   * IAM Role & IAM Instance profile(for EC2 to use SSM)
+#
+# - Notes
+# After build, you have to add appropriate route on private EC2.
+# ------------------------------------------------------------# 
+---
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Required parameters
+        Parameters:
+          - EnvironmentName
+          - MyIPAddress
+          - FortigateEC2KeyName
+      - Label:
+          default: ID
+        Parameters:
+          - VPCCIDR
+          - PublicSubnet1CIDR
+          - PrivateSubnet1CIDR
+
+# ------------------------------------------------------------#
+# Input Parameters
+# ------------------------------------------------------------# 
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: cf-
+
+  VPCCIDR:
+    Type: String
+    Default: "192.168.0.0/16"
+
+  PublicSubnet1CIDR:
+    Type: String
+    Default: "192.168.110.0/24"
+
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: "192.168.10.0/24"
+
+  MyIPAddress:
+    Description: IPAddress of Computer for connecting fortigate
+    Type: String
+    Default: "x.x.x.x/32"
+  
+  FortigateEC2KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the fortigate EC2.
+    Type: String
+
+Resources:
+# ------------------------------------------------------------#
+#  VPC
+# ------------------------------------------------------------#
+# VPC Create
+  VPC:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::VPC"
+    DeletionPolicy: "Delete"
+    Properties: 
+      CidrBlock: !Ref VPCCIDR
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+      InstanceTenancy: default
+      Tags: 
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-vpc"
+# InternetGateway Create
+  InternetGateway: 
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags: 
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-igw"
+
+# IGW Attach
+  InternetGatewayAttachment: 
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+# ------------------------------------------------------------#
+#  Subnet
+# ------------------------------------------------------------#  
+  PublicSubnet1:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::Subnet"
+    DeletionPolicy: "Delete"
+    Properties:
+      VpcId:
+        Ref: "VPC"
+      MapPublicIpOnLaunch: false
+      EnableDns64: false
+      AvailabilityZoneId: "apne1-az4"
+      PrivateDnsNameOptionsOnLaunch:
+        EnableResourceNameDnsARecord: false
+        HostnameType: "ip-name"
+        EnableResourceNameDnsAAAARecord: false
+      CidrBlock: !Ref PublicSubnet1CIDR
+      Ipv6Native: false
+      Tags:
+      - Value: !Sub "${EnvironmentName}-PublicSubnet1"
+        Key: "Name"
+  PrivateSubnet1:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::Subnet"
+    DeletionPolicy: "Delete"
+    Properties:
+      VpcId:
+        Ref: "VPC"
+      MapPublicIpOnLaunch: false
+      EnableDns64: false
+      AvailabilityZoneId: "apne1-az4"
+      PrivateDnsNameOptionsOnLaunch:
+        EnableResourceNameDnsARecord: false
+        HostnameType: "ip-name"
+        EnableResourceNameDnsAAAARecord: false
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      Ipv6Native: false
+      Tags:
+      - Value: !Sub "${EnvironmentName}-PrivateSubnet1"
+        Key: "Name"
+# ------------------------------------------------------------#
+#  RouteTable
+# ------------------------------------------------------------#
+  EC2PublicRouteTable:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::RouteTable"
+    DeletionPolicy: "Delete"
+    Properties:
+      VpcId:
+        Ref: "VPC"
+      Tags:
+      - Value: !Sub "${EnvironmentName}-public-rb"
+        Key: "Name"
+  EC2PrivateRouteTable:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::RouteTable"
+    DeletionPolicy: "Delete"
+    Properties:
+      VpcId:
+        Ref: "VPC"
+      Tags:
+      - Value: !Sub "${EnvironmentName}-private-rb"
+        Key: "Name"
+# ------------------------------------------------------------#
+# Routing
+# ------------------------------------------------------------# 
+  PublicDafaultRoute:
+    Type: "AWS::EC2::Route"
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref EC2PublicRouteTable
+  PrivateDafaultRoute:
+    Type: "AWS::EC2::Route"
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NetworkInterfaceId: !Ref FortigateLANPrivateNetworkInterface
+      RouteTableId: !Ref EC2PrivateRouteTable
+# ------------------------------------------------------------#
+# RouteTable Associate
+# ------------------------------------------------------------#
+# PublicRouteTable Associate PublicSubnetA
+  PublicSubnet1RouteTableAssociation: 
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties: 
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref EC2PublicRouteTable
+# PrivateRouteTable Associate PrivateSubnetA
+  PrivateSubnet1RouteTableAssociation: 
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties: 
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref EC2PrivateRouteTable
+
+# ------------------------------------------------------------#
+# NetworkACL
+# ------------------------------------------------------------# 
+# NetworkACL
+  NetworkACL:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::NetworkAcl"
+    DeletionPolicy: "Delete"
+    Properties:
+      VpcId:
+        Ref: "VPC"
+      Tags: []
+
+# NetworkACL Association with Subnet
+  NetworkACLAssociation1:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::SubnetNetworkAclAssociation"
+    DeletionPolicy: "Delete"
+    Properties:
+      NetworkAclId:
+        Ref: "NetworkACL"
+      SubnetId:
+        Ref: "PrivateSubnet1"
+
+# ------------------------------------------------------------#
+# Endpoint
+# ------------------------------------------------------------# 
+  VPCEndpointSSMmessages:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::VPCEndpoint"
+    DeletionPolicy: "Delete"
+    Properties:
+      PrivateDnsEnabled: true
+      VpcId:
+        Ref: "VPC"
+      RouteTableIds: []
+      ServiceName: "com.amazonaws.ap-northeast-1.ssmmessages"
+      PolicyDocument:
+        Statement:
+        - Resource: "*"
+          Action: "*"
+          Effect: "Allow"
+          Principal: "*"
+      VpcEndpointType: "Interface"
+      SecurityGroupIds:
+      - Ref: "SecurityGroupForEndpoint"
+      SubnetIds:
+      - Ref: "PrivateSubnet1"
+  VPCEndpointEC2messages:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::VPCEndpoint"
+    DeletionPolicy: "Delete"
+    Properties:
+      PrivateDnsEnabled: true
+      VpcId:
+        Ref: "VPC"
+      RouteTableIds: []
+      ServiceName: "com.amazonaws.ap-northeast-1.ec2messages"
+      PolicyDocument:
+        Statement:
+        - Resource: "*"
+          Action: "*"
+          Effect: "Allow"
+          Principal: "*"
+      VpcEndpointType: "Interface"
+      SecurityGroupIds:
+      - Ref: "SecurityGroupForEndpoint"
+      SubnetIds:
+      - Ref: "PrivateSubnet1"
+  VPCEndpointSSM:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::VPCEndpoint"
+    DeletionPolicy: "Delete"
+    Properties:
+      PrivateDnsEnabled: true
+      VpcId:
+        Ref: "VPC"
+      RouteTableIds: []
+      ServiceName: "com.amazonaws.ap-northeast-1.ssm"
+      PolicyDocument:
+        Statement:
+        - Resource: "*"
+          Action: "*"
+          Effect: "Allow"
+          Principal: "*"
+      VpcEndpointType: "Interface"
+      SecurityGroupIds:
+      - Ref: "SecurityGroupForEndpoint"
+      SubnetIds:
+      - Ref: "PrivateSubnet1"
+  VPCEndpointS3:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::VPCEndpoint"
+    DeletionPolicy: "Delete"
+    Properties:
+      PrivateDnsEnabled: false
+      VpcId:
+        Ref: "VPC"
+      RouteTableIds:
+      - Ref: "EC2PrivateRouteTable"
+      ServiceName: "com.amazonaws.ap-northeast-1.s3"
+      PolicyDocument:
+        Version: "2008-10-17"
+        Statement:
+        - Resource: "*"
+          Action: "*"
+          Effect: "Allow"
+          Principal: "*"
+      VpcEndpointType: "Gateway"
+      SecurityGroupIds: []
+      SubnetIds: []
+# ------------------------------------------------------------#
+# Security Group
+# ------------------------------------------------------------# 
+  SecurityGroupForEndpoint:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::SecurityGroup"
+    DeletionPolicy: "Delete"
+    Properties:
+      GroupDescription: "private lambda sg for endpoints"
+      GroupName: !Sub "${EnvironmentName}-endpoint-sg"
+      VpcId:
+        Ref: "VPC"
+      SecurityGroupIngress:
+      - CidrIp: "0.0.0.0/0"
+        IpProtocol: "tcp"
+        Description: !Sub "${EnvironmentName}-vpc"
+        FromPort: 443
+        ToPort: 443
+      Tags:
+      - Value: !Sub "${EnvironmentName}-endpoint-sg"
+        Key: "Name"
+  SecurityGroupForFortigateExternalENI:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::SecurityGroup"
+    DeletionPolicy: "Delete"
+    Properties:
+      GroupDescription: "private lambda sg for ec2"
+      GroupName: !Sub "${EnvironmentName}-public-fortigate-ec2-sg"
+      VpcId:
+        Ref: "VPC"
+      SecurityGroupIngress:
+      - CidrIp: !Ref MyIPAddress
+        IpProtocol: "tcp"
+        FromPort: 22
+        ToPort: 22
+      - CidrIp: !Ref MyIPAddress
+        IpProtocol: "tcp"
+        FromPort: 80
+        ToPort: 80
+      - CidrIp: !Ref MyIPAddress
+        IpProtocol: "tcp"
+        FromPort: 443
+        ToPort: 443
+      - CidrIp: !Ref MyIPAddress
+        IpProtocol: "tcp"
+        FromPort: 541
+        ToPort: 541
+      - CidrIp: !Ref MyIPAddress
+        IpProtocol: "tcp"
+        FromPort: 3000
+        ToPort: 3000
+      - CidrIp: !Ref MyIPAddress
+        IpProtocol: "tcp"
+        FromPort: 8080
+        ToPort: 8080
+      SecurityGroupEgress:
+      - CidrIp: "0.0.0.0/0"
+        IpProtocol: "-1"
+        FromPort: -1
+        ToPort: -1
+      Tags:
+      - Value: !Sub "${EnvironmentName}-public-fortigate-ec2-sg"
+        Key: "Name"
+  SecurityGroupForPrivateEC2:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::SecurityGroup"
+    DeletionPolicy: "Delete"
+    Properties:
+      GroupDescription: "private lambda sg for ec2"
+      GroupName: !Sub "${EnvironmentName}-private-ec2-sg"
+      VpcId:
+        Ref: "VPC"
+      SecurityGroupIngress:
+      - CidrIp: !Ref PrivateSubnet1CIDR
+        IpProtocol: "tcp"
+        FromPort: 80
+        ToPort: 80
+      SecurityGroupEgress:
+      - CidrIp: "0.0.0.0/0"
+        IpProtocol: "-1"
+        FromPort: -1
+        ToPort: -1
+      Tags:
+      - Value: !Sub "${EnvironmentName}-ec2-sg"
+        Key: "Name"
+  SecurityGroupForFortigateInternalENI:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::SecurityGroup"
+    DeletionPolicy: "Delete"
+    Properties:
+      GroupDescription: "sg for fortigate LAN ENI"
+      GroupName: !Sub "${EnvironmentName}-Fortigate-ENI-LAN-sg"
+      VpcId:
+        Ref: "VPC"
+      SecurityGroupIngress:
+      - CidrIp: !Ref PrivateSubnet1CIDR
+        IpProtocol: "-1"
+        FromPort: -1
+        ToPort: -1
+      SecurityGroupEgress:
+      - CidrIp: "0.0.0.0/0"
+        IpProtocol: "-1"
+        FromPort: -1
+        ToPort: -1
+      Tags:
+      - Value: !Sub "${EnvironmentName}-Fortigate-ENI-LAN-sg"
+        Key: "Name"
+# ------------------------------------------------------------#
+# EC2
+# ------------------------------------------------------------# 
+# EC2 Instances
+  EC2InstancePublicFortigate:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::Instance"
+    DeletionPolicy: "Delete"
+    Properties:
+      Tenancy: "default"
+      AvailabilityZone: "ap-northeast-1a"
+      VpcId: !Ref "VPC"
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubnet1
+          GroupSet:
+            - !Ref SecurityGroupForFortigateExternalENI
+      ImageId: "ami-00e02ef4be8e1f0f5"
+      KeyName: !Ref FortigateEC2KeyName
+      InstanceType: "t2.small"
+      Monitoring: false
+      Tags:
+      - Value: !Sub "${EnvironmentName}-public-fortigate-ec2"
+        Key: "Name"
+      CreditSpecification:
+        CPUCredits: "standard"
+
+  EC2InstancePrivate:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::Instance"
+    DeletionPolicy: "Delete"
+    Properties:
+      Tenancy: "default"
+      AvailabilityZone: "ap-northeast-1a"
+      IamInstanceProfile:
+        Ref: "IAMInstanceProfile"
+      VpcId: !Ref "VPC"
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          SubnetId: !Ref PrivateSubnet1
+          GroupSet:
+            - !Ref SecurityGroupForPrivateEC2
+      ImageId: "ami-0091f05e4b8ee6709"
+      InstanceType: "t2.micro"
+      Monitoring: false
+      Tags:
+      - Value: !Sub "${EnvironmentName}-private-ec2"
+        Key: "Name"
+      CreditSpecification:
+        CPUCredits: "standard"
+# ------------------------------------------------------------#
+# Network Interface
+# ------------------------------------------------------------# 
+  FortigateLANPrivateNetworkInterface:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::NetworkInterface"
+    DeletionPolicy: "Delete"
+    Properties:
+      Description: "ENI for Fortigate LAN"
+      GroupSet:
+      - !Ref SecurityGroupForFortigateInternalENI
+      SubnetId:
+        !Ref PrivateSubnet1
+      SourceDestCheck: false
+      InterfaceType: "interface"
+      Tags:
+      - Value: !Sub "${EnvironmentName}-Fortigate-Internal-ENI"
+        Key: "Name"
+# ------------------------------------------------------------#
+# Network Interface Attachement
+# ------------------------------------------------------------#
+  FortigateLANPrivateNetworkInterfaceAttachement:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::NetworkInterfaceAttachment"
+    DeletionPolicy: "Delete"
+    Properties:
+      DeleteOnTermination: true
+      DeviceIndex: 1
+      NetworkInterfaceId: !Ref FortigateLANPrivateNetworkInterface
+      InstanceId: !Ref EC2InstancePublicFortigate
+    # To avoid the error, associate the EIP with the first Network Interface of the EC2 instance 
+    # and then attach a second Network Interface to the EC2 instance.
+    DependsOn: IPAssociation
+# ------------------------------------------------------------#
+# EIP
+# ------------------------------------------------------------# 
+  ElasticIP:
+    Type: "AWS::EC2::EIP"
+    Properties:
+      Domain: vpc
+
+  IPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref EC2InstancePublicFortigate
+      EIP: !Ref ElasticIP
+# ------------------------------------------------------------#
+# IAM
+# ------------------------------------------------------------# 
+# IAM Role
+  IAMRoleofSSMforEC2:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::IAM::Role"
+    DeletionPolicy: "Delete"
+    Properties:
+      Path: "/"
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      MaxSessionDuration: 3600
+      RoleName: !Sub "${EnvironmentName}-ec2-ssm-role-cf"
+      Description: "Allows EC2 instances to call AWS services on your behalf."
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action: "sts:AssumeRole"
+          Effect: "Allow"
+          Principal:
+            Service: "ec2.amazonaws.com"
+
+  IAMInstanceProfile:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::IAM::InstanceProfile"
+    DeletionPolicy: "Delete"
+    Properties:
+      Path: "/"
+      Roles:
+      - Ref: "IAMRoleofSSMforEC2"
+      InstanceProfileName:
+        Ref: "IAMRoleofSSMforEC2"
+# ------------------------------------------------------------#
+# Output Parameters
+# ------------------------------------------------------------# 
+Outputs:
+  VPCID:
+    Description: The ID of the created VPC
+    Value: !Ref VPC
+  PublicSubnet1ID:
+    Description: The ID of the created Public Subnet
+    Value: !Ref PublicSubnet1
+  PrivateSubnet1ID:
+    Description: The ID of the created Private Subnet
+    Value: !Ref PrivateSubnet1
+  FortigateEC2InstanceID:
+    Description: The ID of the created Fortigate EC2 innstance
+    Value: !Ref EC2InstancePublicFortigate
+  EIP:
+    Description: The created Elastic IP address
+    Value: !Ref ElasticIP

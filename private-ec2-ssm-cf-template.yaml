@@ -1,0 +1,250 @@
+# ------------------------------------------------------------#
+# Description
+# - Purpose
+# Create EC2 on existing private subnet,
+# and an environment where the EC2 can be connected using SSM.
+# 
+# - Condition
+# One VPC and one private subnets have been created.
+#
+# - Create
+#   * EC2
+#   * VPCEndpoint(3 Interfaces, 1 Gateway)
+#   * Security group (for EC2, for VPCEndpoint)
+#   * IAM Role & IAM Instance profile(for EC2 to use SSM)
+#
+# - Notes
+# 
+# ------------------------------------------------------------# 
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Required parameters
+        Parameters:
+          - EnvironmentName
+      - Label:
+          default: ID
+        Parameters:
+          - VPCID
+          - PrivateSubnetId
+          - RouteTableId
+# ------------------------------------------------------------#
+# Input Parameters
+# ------------------------------------------------------------# 
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: cf-endpoints-for-private-ec2-ssm
+
+  VPCID:
+    Description: VPC with a private subnet in which to place EC2 instance
+    Type: String
+    Default: vpc-XXXXXXXXXXXXXXXXX
+  
+  PrivateSubnetId:
+    Description: Private subnet to place EC2 instances
+    Type: String
+    Default: subnet-XXXXXXXXXXXXXXXXX
+  
+  RouteTableId:
+    Description: The route table associated with the private subnet
+    Type: String
+    Default: rtb-XXXXXXXXXXXXXXXXX
+
+Resources:
+# ------------------------------------------------------------#
+# Endpoint
+# ------------------------------------------------------------# 
+  VPCEndpointSSMmessages:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::VPCEndpoint"
+    DeletionPolicy: "Delete"
+    Properties:
+      PrivateDnsEnabled: true
+      VpcId:
+        !Ref VPCID
+      RouteTableIds: []
+      ServiceName: "com.amazonaws.ap-northeast-1.ssmmessages"
+      PolicyDocument:
+        Statement:
+        - Resource: "*"
+          Action: "*"
+          Effect: "Allow"
+          Principal: "*"
+      VpcEndpointType: "Interface"
+      SecurityGroupIds:
+      - !Ref SecurityGroupForEndpoint
+      SubnetIds:
+      - !Ref PrivateSubnetId
+  VPCEndpointEC2messages:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::VPCEndpoint"
+    DeletionPolicy: "Delete"
+    Properties:
+      PrivateDnsEnabled: true
+      VpcId:
+        !Ref VPCID
+      RouteTableIds: []
+      ServiceName: "com.amazonaws.ap-northeast-1.ec2messages"
+      PolicyDocument:
+        Statement:
+        - Resource: "*"
+          Action: "*"
+          Effect: "Allow"
+          Principal: "*"
+      VpcEndpointType: "Interface"
+      SecurityGroupIds:
+      - !Ref SecurityGroupForEndpoint
+      SubnetIds:
+      - !Ref PrivateSubnetId
+  VPCEndpointSSM:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::VPCEndpoint"
+    DeletionPolicy: "Delete"
+    Properties:
+      PrivateDnsEnabled: true
+      VpcId:
+        !Ref VPCID
+      RouteTableIds: []
+      ServiceName: "com.amazonaws.ap-northeast-1.ssm"
+      PolicyDocument:
+        Statement:
+        - Resource: "*"
+          Action: "*"
+          Effect: "Allow"
+          Principal: "*"
+      VpcEndpointType: "Interface"
+      SecurityGroupIds:
+      - !Ref SecurityGroupForEndpoint
+      SubnetIds:
+      - !Ref PrivateSubnetId
+  VPCEndpointS3:
+    UpdateReplacePolicy: Delete
+    Type: AWS::EC2::VPCEndpoint
+    DeletionPolicy: Delete
+    Properties:
+      #!!!!!!!!!!!!!!???????????
+      PrivateDnsEnabled: false
+      VpcId: !Ref VPCID
+      RouteTableIds:
+        - !Ref RouteTableId
+      ServiceName: com.amazonaws.ap-northeast-1.s3
+      PolicyDocument:
+        Statement:
+          - Resource: '*'
+            Action: '*'
+            Effect: Allow
+            Principal: '*'
+      VpcEndpointType: "Gateway"
+# ------------------------------------------------------------#
+# Security Group
+# ------------------------------------------------------------# 
+  SecurityGroupForEndpoint:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::SecurityGroup"
+    DeletionPolicy: "Delete"
+    Properties:
+      GroupDescription: "sg for endpoints of ssm"
+      GroupName: !Sub "${EnvironmentName}-endpoint-sg"
+      VpcId:
+        !Ref VPCID
+      SecurityGroupIngress:
+      - CidrIp: "0.0.0.0/0"
+        IpProtocol: "tcp"
+        Description: !Sub "${EnvironmentName}-vpc"
+        FromPort: 443
+        ToPort: 443
+      Tags:
+      - Key: "Name"
+        Value: !Sub "${EnvironmentName}-endpoint-sg"
+  SecurityGroupForEC2:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::SecurityGroup"
+    DeletionPolicy: "Delete"
+    Properties:
+      GroupDescription: "private lambda sg for ec2"
+      GroupName: !Sub "${EnvironmentName}-ec2-sg"
+      VpcId: !Ref "VPCID"
+      SecurityGroupIngress:
+      - CidrIp: "10.0.0.0/8"
+        IpProtocol: "-1"
+        FromPort: -1
+        ToPort: -1
+      SecurityGroupEgress:
+      - CidrIp: "0.0.0.0/0"
+        IpProtocol: "-1"
+        FromPort: -1
+        ToPort: -1
+      Tags:
+      - Key: "Name"
+        Value: !Sub "${EnvironmentName}-ec2-sg"
+# ------------------------------------------------------------#
+# EC2
+# ------------------------------------------------------------# 
+# EC2 Instances
+  EC2InstancePrivate:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::EC2::Instance"
+    DeletionPolicy: "Delete"
+    Properties:
+      Tenancy: "default"
+      AvailabilityZone: "ap-northeast-1a"
+      IamInstanceProfile: !Ref "IAMRoleofSSMforEC2"
+      # IamInstanceProfile: !Ref "IAMInstanceProfile"
+      SubnetId: !Ref "PrivateSubnetId"
+      VpcId: !Ref "VPCID"
+      SecurityGroupIds:
+      - !Ref SecurityGroupForEC2
+      ImageId: "ami-0091f05e4b8ee6709"
+      InstanceType: "t2.micro"
+      Monitoring: false
+      Tags:
+      - Key: "Name"
+        Value: !Sub "${EnvironmentName}-ec2"
+      # CreditSpecification:
+      #   CPUCredits: "standard"
+# ------------------------------------------------------------#
+# IAM
+# ------------------------------------------------------------# 
+  IAMRoleofSSMforEC2:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::IAM::Role"
+    DeletionPolicy: "Delete"
+    Properties:
+      Path: "/"
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      MaxSessionDuration: 3600
+      RoleName: !Sub "${EnvironmentName}-ec2-ssm-role-cf"
+      Description: "Allows EC2 instances to call AWS services on your behalf."
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action: "sts:AssumeRole"
+          Effect: "Allow"
+          Principal:
+            Service: "ec2.amazonaws.com"
+
+  IAMInstanceProfile:
+    UpdateReplacePolicy: "Delete"
+    Type: "AWS::IAM::InstanceProfile"
+    DeletionPolicy: "Delete"
+    Properties:
+      Path: "/"
+      Roles:
+      - Ref: "IAMRoleofSSMforEC2"
+      InstanceProfileName:
+        Ref: "IAMRoleofSSMforEC2"
+
+# ------------------------------------------------------------#
+#  Route
+# ------------------------------------------------------------#     
+  # RouteS3PlefixList:
+  #   UpdateReplacePolicy: Delete
+  #   Type: AWS::EC2::Route
+  #   DeletionPolicy: Delete
+  #   Properties:
+  #     DestinationPrefixListId: pl-61a54008
+  #     GatewayId: !Ref VPCEndpointS3
+  #     RouteTableId: !Ref RouteTableId
